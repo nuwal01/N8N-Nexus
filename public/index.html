@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>N8N Nexus</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        input { display: block; margin: 10px 0; padding: 5px; width: 300px; }
+        button { padding: 10px 20px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>N8N Nexus Dashboard</h1>
+    <input type="text" id="n8nUrl" placeholder="n8n URL (e.g., http://localhost:5678)">
+    <input type="password" id="apiKey" placeholder="n8n API Key">
+    <button onclick="connect()">Connect</button>
+    <script>
+        function connect() {
+            const url = document.getElementById('n8nUrl').value;
+            const key = document.getElementById('apiKey').value;
+            if (url && key) {
+                alert(`Connecting to ${url}... (Note: This is a demo placeholder)`);
+            } else {
+                alert('Please enter both URL and API Key');
+            }
+        }
+    </script>
+</body>
+</html>
