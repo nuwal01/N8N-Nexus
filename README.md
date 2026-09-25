@@ -1,33 +1,33 @@
 # N8N Nexus
 
-Stage 1 is a single-workspace operations dashboard for n8n. It includes a public product site and a private connection-based dashboard for workflows and executions.
+N8N Nexus is a multi-user operations dashboard for n8n with an optional, approval-gated AI workflow assistant.
 
 ## Included
 
-- Connect to n8n Cloud or a self-hosted/local n8n instance with its URL and API key
-- List workflows and activate/deactivate them
-- List execution history and inspect execution errors
-- Show the failed node, message, description, and stack when n8n returns them
-- Retry failed executions
-- Demo mode for testing without an n8n instance
-
-Nexus AI, persistent user accounts, and multi-user organizations are intentionally out of scope for Stage 1.
+- Private name/email/password accounts with database-backed sessions
+- A separate encrypted n8n URL and API key for every account
+- Per-user OpenAI or Anthropic configuration for Nexus AI
+- Workflow and execution monitoring, activation controls, failed-run details, and retries
+- AI workflow creation, editing, diagnosis, exact previews, and explicit save approval
+- Demo mode for evaluating the interface without external credentials
 
 ## Local development
 
 Requirements: Node.js 22.13 or newer.
 
-```bash
-npm install
-npm run dev
-```
+1. Copy `.env.example` to `.env.local` and replace both values with different random secrets of at least 32 characters.
+2. Install packages with `npm install`.
+3. Start the app with `npm run dev`.
+4. Open the local URL and create an account.
 
-Open the local URL shown by the development server. Click **Explore with demo data** to test the full interface without credentials.
+The D1 database is bound as `DB`. Local development uses the project-local Wrangler database. The schema is initialized safely at runtime and is also recorded in `migrations/0001_multi_user.sql` for deployment review.
 
-For a real connection, create an API key in n8n under **Settings → API**, then enter the instance URL and key on the Nexus connection screen. When n8n is running locally, use `http://localhost:5678`.
+For local n8n, use `http://localhost:5678` while Nexus is also running on the same computer. A hosted Nexus server cannot directly reach a user’s localhost; use n8n Cloud or expose the self-hosted instance through a secure HTTPS URL.
 
 ## Secrets
 
-All `.env*` files are ignored except `.env.example`. In production, set a strong `SESSION_SECRET` in the hosting environment. n8n connection details are encrypted into an HTTP-only session cookie and are not written to the repository or browser storage.
+All `.env*` files are ignored except `.env.example`. `SESSION_SECRET` protects session-token hashes and `DATA_ENCRYPTION_KEY` encrypts saved n8n and LLM configurations. Keys are not returned by APIs, stored in browser storage, or written to logs.
+
+Existing Stage 2 connection cookies are deliberately not migrated into user accounts. Reconnect after creating an account.
 
 > The repository's original `QUICK_START.md` contained an API key in Git history. Revoke that key before using this project.

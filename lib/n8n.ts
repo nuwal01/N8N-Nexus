@@ -1,4 +1,4 @@
-import { getConnection } from "./session";
+import { AuthError, getConnection } from "./session";
 import type { Connection } from "./types";
 
 export class N8nApiError extends Error {
@@ -54,8 +54,12 @@ export async function n8nFetch<T>(connection: Connection, path: string, init: Re
 }
 
 export function apiError(error: unknown) {
-  const status = error instanceof N8nApiError ? error.status : 500;
-  const message = error instanceof Error ? error.message : "Unexpected server error.";
+  const status = error instanceof N8nApiError || error instanceof AuthError ? error.status : 500;
+  const rawMessage = error instanceof Error ? error.message : "Unexpected server error.";
+  const message = rawMessage
+    .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted]");
   const code = /cannot be activated because it has no trigger node/i.test(message)
     ? "MISSING_TRIGGER"
     : undefined;

@@ -17,15 +17,15 @@ export default function Home() {
       <nav className="site-nav wrap" aria-label="Primary navigation">
         <Link className="brand" href="/" aria-label="N8N Nexus home"><span className="brand-mark">N</span><span>N8N Nexus</span></Link>
         <div className="nav-links"><a href="#capabilities">Capabilities</a><a href="#security">Security</a></div>
-        <Link className="button button-small button-dark" href="/dashboard">Open dashboard <span>↗</span></Link>
+        <div className="landing-auth"><Link className="text-link" href="/login">Log in</Link><Link className="button button-small button-dark" href="/signup">Sign up <span>↗</span></Link></div>
       </nav>
 
       <section className="hero wrap">
-        <div className="eyebrow"><span className="live-dot" /> Stage 1 · n8n operations</div>
+        <div className="eyebrow"><span className="live-dot" /> Stage 3 · private n8n operations</div>
         <h1>Your automations.<br /><em>Under control.</em></h1>
         <p className="hero-copy">One clear place to monitor workflows, understand failures, and keep every n8n automation moving.</p>
         <div className="hero-actions">
-          <Link className="button button-primary" href="/dashboard">Connect your n8n <span>→</span></Link>
+          <Link className="button button-primary" href="/signup">Create your private workspace <span>→</span></Link>
           <a className="text-link" href="#capabilities">See what it does <span>↓</span></a>
         </div>
         <div className="hero-board" aria-label="Dashboard preview">
@@ -51,10 +51,10 @@ export default function Home() {
         <div className="feature-grid">{features.map(([number, title, copy]) => <article className="feature-card" key={number}><span className="feature-number">{number}</span><div className="feature-glyph" aria-hidden="true"><i /><i /><i /></div><h3>{title}</h3><p>{copy}</p></article>)}</div>
       </section>
 
-      <section className="security-section" id="security"><div className="wrap security-inner"><div><span className="kicker light">CONNECTION-FIRST SECURITY</span><h2>Your credentials are<br />not our product.</h2></div><p>Nexus uses your n8n URL and API key only to reach your instance. Stage 1 keeps the connection in an encrypted, HTTP-only session — never in source control or browser storage.</p></div></section>
+      <section className="security-section" id="security"><div className="wrap security-inner"><div><span className="kicker light">ACCOUNT-LEVEL SECURITY</span><h2>Your credentials are<br />not our product.</h2></div><p>Every account has its own encrypted n8n and optional LLM connection. Credentials remain server-side and are never shared between Nexus users, committed to source control, or stored in browser storage.</p></div></section>
 
-      <section className="cta wrap"><div><span className="kicker">READY WHEN YOU ARE</span><h2>Bring calm to<br />your automations.</h2></div><Link className="button button-primary button-large" href="/dashboard">Open N8N Nexus <span>→</span></Link></section>
-      <footer className="site-footer wrap"><Link className="brand" href="/"><span className="brand-mark">N</span><span>N8N Nexus</span></Link><p>Stage 1 · Operations dashboard</p><p>Built for n8n teams.</p></footer>
+      <section className="cta wrap"><div><span className="kicker">READY WHEN YOU ARE</span><h2>Bring calm to<br />your automations.</h2></div><Link className="button button-primary button-large" href="/signup">Create account <span>→</span></Link></section>
+      <footer className="site-footer wrap"><Link className="brand" href="/"><span className="brand-mark">N</span><span>N8N Nexus</span></Link><p>Stage 3 · Private workspaces</p><p>Built for n8n teams.</p></footer>
     </main>
   );
 }

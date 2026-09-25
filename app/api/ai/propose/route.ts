@@ -1,11 +1,12 @@
 import { demoExecutions, demoWorkflows } from "../../../../lib/demo-data";
 import { generateProposal, sanitizeExecution, sanitizeWorkflow } from "../../../../lib/ai";
 import { apiError, n8nFetch, requireConnection } from "../../../../lib/n8n";
-import { getLlmConfig, sealValue } from "../../../../lib/session";
+import { getLlmConfig, requireUser, sealValue } from "../../../../lib/session";
 import type { Execution } from "../../../../lib/types";
 
 export async function POST(request: Request) {
   try {
+    const user = await requireUser(request);
     const connection = await requireConnection(request);
     const config = await getLlmConfig(request);
     if (!config) return Response.json({ error: "Configure an LLM provider before using Nexus AI." }, { status: 412 });
@@ -26,7 +27,7 @@ export async function POST(request: Request) {
     }
     const workflow = rawWorkflow ? { ...sanitizeWorkflow(rawWorkflow), id: String(rawWorkflow.id || body.workflowId || execution?.workflowId || "") } : undefined;
     const proposal = await generateProposal({ config, connection, mode: body.mode, request: body.request.trim(), workflow, execution: execution ? sanitizeExecution(execution) : undefined });
-    const approvalToken = proposal.safeToApply && proposal.workflow ? await sealValue({ proposal, issuedAt: Date.now(), expiresAt: Date.now() + 15 * 60_000 }) : null;
+    const approvalToken = proposal.safeToApply && proposal.workflow ? await sealValue({ proposal, userId: user.id, issuedAt: Date.now(), expiresAt: Date.now() + 15 * 60_000 }) : null;
     return Response.json({ proposal, approvalToken });
   } catch (error) {
     return apiError(error);

@@ -1,15 +1,19 @@
 import { discoverProviderModel, ProviderSetupError } from "../../../../lib/ai";
 import { apiError, requireConnection } from "../../../../lib/n8n";
-import { clearedLlmCookie, getLlmConfig, llmCookie, sealValue } from "../../../../lib/session";
+import { getLlmConfig, removeLlmConfig, requireUser, saveLlmConfig } from "../../../../lib/session";
 import type { LlmConfig, LlmProvider } from "../../../../lib/types";
 
 export async function GET(request: Request) {
-  const config = await getLlmConfig(request);
-  return Response.json({ configured: Boolean(config), provider: config?.provider || null, model: config?.model || null });
+  try {
+    await requireUser(request);
+    const config = await getLlmConfig(request);
+    return Response.json({ configured: Boolean(config), provider: config?.provider || null, model: config?.model || null });
+  } catch (error) { return apiError(error); }
 }
 
 export async function POST(request: Request) {
   try {
+    const user = await requireUser(request);
     const connection = await requireConnection(request);
     const body = await request.json() as { provider?: LlmProvider; apiKey?: string; model?: string };
     if (!body.provider || !["openai", "anthropic", "demo"].includes(body.provider)) return Response.json({ error: "Choose a supported provider." }, { status: 400 });
@@ -22,14 +26,18 @@ export async function POST(request: Request) {
       ? { model: "nexus-demo", availableModels: ["nexus-demo"], discovery: "discovered" as const, discoveryMessage: "Using the built-in demo model. No external provider was contacted." }
       : await discoverProviderModel(body.provider, apiKey!, body.model);
     const config: LlmConfig = { provider: body.provider, model: discovery.model, apiKey };
-    const token = await sealValue(config);
-    return Response.json({ configured: true, provider: config.provider, model: config.model, discovery: discovery.discovery, discoveryMessage: discovery.discoveryMessage }, { headers: { "set-cookie": llmCookie(token) } });
+    await saveLlmConfig(user.id, config);
+    return Response.json({ configured: true, provider: config.provider, model: config.model, discovery: discovery.discovery, discoveryMessage: discovery.discoveryMessage });
   } catch (error) {
     if (error instanceof ProviderSetupError) return Response.json({ error: error.message }, { status: error.status });
     return apiError(error);
   }
 }
 
-export async function DELETE() {
-  return Response.json({ configured: false, provider: null, model: null }, { headers: { "set-cookie": clearedLlmCookie() } });
+export async function DELETE(request: Request) {
+  try {
+    const user = await requireUser(request);
+    await removeLlmConfig(user.id);
+    return Response.json({ configured: false, provider: null, model: null });
+  } catch (error) { return apiError(error); }
 }

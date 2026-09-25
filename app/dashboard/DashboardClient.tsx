@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Execution, Workflow } from "../../lib/types";
 import NexusAi from "./NexusAi";
 
-type ConnectionState = { connected: boolean; mode: "live" | "demo" | null; baseUrl: string | null };
+type ConnectionState = { connected: boolean; saved: boolean; mode: "live" | "demo" | null; baseUrl: string | null; user: { name: string; email: string } };
 type WorkflowIssue = { id: string; name: string; message: string; href: string };
 
 class ApiRequestError extends Error {
@@ -46,7 +46,7 @@ export default function DashboardClient({ initialConnection }: { initialConnecti
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [selected, setSelected] = useState<Execution | null>(null);
-  const [section, setSection] = useState<"overview" | "workflows" | "executions" | "ai">("overview");
+  const [section, setSection] = useState<"overview" | "workflows" | "executions" | "ai" | "account">("overview");
   const [loading, setLoading] = useState(initialConnection.connected);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -65,7 +65,7 @@ export default function DashboardClient({ initialConnection }: { initialConnecti
       setExecutions(executionResult.data || []);
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 401) {
-        setConnection({ connected: false, mode: null, baseUrl: null });
+        window.location.assign("/login");
       }
       setError(err instanceof Error ? err.message : "Could not load n8n data.");
     } finally {
@@ -92,8 +92,8 @@ export default function DashboardClient({ initialConnection }: { initialConnecti
     const form = new FormData(event.currentTarget);
     setLoading(true); setError("");
     try {
-      const state = await api<ConnectionState>("/api/connection", { method: "POST", body: JSON.stringify({ baseUrl: form.get("baseUrl"), apiKey: form.get("apiKey") }) });
-      setConnection(state);
+      const state = await api<Omit<ConnectionState, "user">>("/api/connection", { method: "POST", body: JSON.stringify({ baseUrl: form.get("baseUrl"), apiKey: form.get("apiKey") }) });
+      setConnection({ ...state, user: connection.user });
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Connection failed.");
@@ -104,16 +104,33 @@ export default function DashboardClient({ initialConnection }: { initialConnecti
   async function connectDemo() {
     setLoading(true); setError("");
     try {
-      const state = await api<ConnectionState>("/api/connection", { method: "POST", body: JSON.stringify({ demo: true }) });
-      setConnection(state);
+      const state = await api<Omit<ConnectionState, "user">>("/api/connection", { method: "POST", body: JSON.stringify({ demo: true }) });
+      setConnection({ ...state, user: connection.user });
       await loadData();
     } catch (err) { setError(err instanceof Error ? err.message : "Demo could not load."); setLoading(false); }
   }
 
   async function disconnect() {
     await api("/api/connection", { method: "DELETE" });
-    setConnection({ connected: false, mode: null, baseUrl: null });
+    setConnection((current) => ({ ...current, connected: false, saved: true, mode: null }));
     setWorkflows([]); setExecutions([]); setSelected(null); setWorkflowIssue(null); setError("");
+  }
+
+  async function reconnectSaved() {
+    setLoading(true); setError("");
+    try { const state = await api<Omit<ConnectionState, "user">>("/api/connection", { method: "POST", body: JSON.stringify({ saved: true }) }); setConnection({ ...state, user: connection.user }); await loadData(); }
+    catch (err) { setError(err instanceof Error ? err.message : "Saved connection could not be reached."); setLoading(false); }
+  }
+
+  async function logout() {
+    await api("/api/auth/logout", { method: "POST", body: "{}" });
+    window.location.assign("/login");
+  }
+
+  async function removeSavedConnection() {
+    await api("/api/connection?remove=true", { method: "DELETE" });
+    setConnection((current) => ({ ...current, connected: false, saved: false, mode: null, baseUrl: null }));
+    setWorkflows([]); setExecutions([]); setSection("overview"); showToast("Saved n8n connection removed.");
   }
 
   async function toggleWorkflow(workflow: Workflow) {
@@ -166,19 +183,22 @@ export default function DashboardClient({ initialConnection }: { initialConnecti
     return <main className="connect-page">
       <div className="connect-grid" />
       <Link className="brand connect-brand" href="/"><span className="brand-mark">N</span><span>N8N Nexus</span></Link>
+      <button className="connect-logout" onClick={logout}>Log out</button>
       <section className="connect-card">
-        <div className="connect-intro"><span className="kicker">PRIVATE WORKSPACE</span><h1>Connect your<br />n8n instance.</h1><p>Use any n8n Cloud or self-hosted URL. Your API key is encrypted into an HTTP-only session and is never saved to the repository.</p></div>
+        <div className="connect-intro"><span className="kicker">{connection.user.name}&apos;S WORKSPACE</span><h1>Connect your<br />n8n instance.</h1><p>Use an HTTPS URL for n8n Cloud or an internet-reachable self-hosted instance. A hosted Nexus server cannot reach n8n running at localhost on your computer.</p><small className="privacy-note">Your URL and API key are encrypted server-side and belong only to this account.</small></div>
         <form className="connect-form" onSubmit={connect}>
           <label>n8n instance URL<input name="baseUrl" type="url" placeholder="http://localhost:5678" defaultValue="http://localhost:5678" required autoComplete="url" /></label>
           <label>API key<span className="label-note">n8n Settings → API</span><input name="apiKey" type="password" placeholder="Paste your n8n API key" required autoComplete="off" /></label>
           {error && <div className="form-error" role="alert"><span>!</span>{error}</div>}
           <button className="button button-primary connect-submit" disabled={loading}>{loading ? "Connecting…" : "Connect securely"}<span>→</span></button>
+          {connection.saved && <button className="saved-connect-button" type="button" onClick={reconnectSaved} disabled={loading}>Reconnect saved instance <span>→</span></button>}
+          {connection.saved && <button className="remove-saved-button" type="button" onClick={removeSavedConnection} disabled={loading}>Remove saved connection</button>}
           <div className="or"><span />or<span /></div>
           <button className="demo-button" type="button" onClick={connectDemo} disabled={loading}>Explore with demo data <span>↗</span></button>
         </form>
         <div className="connection-foot"><span>◈ Encrypted session</span><span>◉ Works with cloud & local</span></div>
       </section>
-      <p className="connect-note">Stage 2 · Single private workspace · Optional Nexus AI</p>
+      <p className="connect-note">Stage 3 · Signed in as {connection.user.email}</p>
     </main>;
   }
 
@@ -193,14 +213,16 @@ export default function DashboardClient({ initialConnection }: { initialConnecti
         <button className={section === "workflows" ? "active" : ""} onClick={() => setSection("workflows")}><span>⌁</span>Workflows<small>{workflows.length}</small></button>
         <button className={section === "executions" ? "active" : ""} onClick={() => setSection("executions")}><span>↯</span>Executions<small>{stats.failed || ""}</small></button>
         <button className={section === "ai" ? "active" : ""} onClick={() => setSection("ai")}><span>✦</span>Nexus AI<small>NEW</small></button>
+        <button className={section === "account" ? "active" : ""} onClick={() => setSection("account")}><span>◎</span>Account</button>
       </nav>
-      <div className="sidebar-bottom"><div className="instance-card"><span className="instance-dot" /><div><small>{connection.mode === "demo" ? "DEMO MODE" : "CONNECTED INSTANCE"}</small><strong>{connection.baseUrl?.replace(/^https?:\/\//, "")}</strong></div></div><button className="disconnect-button" onClick={disconnect}>Disconnect <span>↗</span></button></div>
+      <div className="sidebar-bottom"><div className="user-card"><small>{connection.user.name}</small><strong>{connection.user.email}</strong></div><div className="instance-card"><span className="instance-dot" /><div><small>{connection.mode === "demo" ? "DEMO MODE" : "CONNECTED INSTANCE"}</small><strong>{connection.baseUrl?.replace(/^https?:\/\//, "")}</strong></div></div><button className="disconnect-button" onClick={disconnect}>Disconnect n8n <span>↗</span></button><button className="disconnect-button" onClick={logout}>Log out <span>→</span></button></div>
     </aside>
     <main className="dashboard-main">
       <header className="dashboard-header"><div><span className="kicker">OPERATIONS CONTROL</span><h1>{section === "ai" ? "Nexus AI" : section[0].toUpperCase() + section.slice(1)}</h1></div><div className="header-actions"><span className="last-updated">Live data</span><button className="refresh-button" onClick={() => loadData(true)} disabled={refreshing}>{refreshing ? "Refreshing…" : "↻ Refresh"}</button><button className="mobile-disconnect-button" onClick={disconnect}>Disconnect</button></div></header>
       {error && <div className="dashboard-error"><span>!</span><p><strong>We hit a snag</strong>{error}</p><button onClick={() => setError("")}>×</button></div>}
       {loading ? <DashboardSkeleton /> : <>
         {section === "ai" && <NexusAi workflows={workflows} executions={executions} mode={connection.mode} onChanged={() => loadData(true)} notify={showToast} />}
+        {section === "account" && <AccountSettings connection={connection} onDisconnect={disconnect} onRemove={removeSavedConnection} onLogout={logout} />}
         {section === "overview" && <section className="metric-grid">
           <article className="metric-card"><small>ACTIVE WORKFLOWS</small><div><strong>{stats.active}</strong><span>of {workflows.length}</span></div><i className="metric-bar"><b style={{ width: `${workflows.length ? stats.active / workflows.length * 100 : 0}%` }} /></i></article>
           <article className="metric-card"><small>SUCCESS RATE</small><div><strong>{stats.rate}%</strong><span>last {executions.length} runs</span></div><i className="metric-spark">⌁</i></article>
@@ -218,6 +240,10 @@ export default function DashboardClient({ initialConnection }: { initialConnecti
 function EmptyState({ message }: { message: string }) { return <div className="empty-state"><span>◇</span><p>{message}</p></div>; }
 
 function DashboardSkeleton() { return <div className="dashboard-skeleton"><div /><div /><div /><section /><section /></div>; }
+
+function AccountSettings({ connection, onDisconnect, onRemove, onLogout }: { connection: ConnectionState; onDisconnect: () => void; onRemove: () => void; onLogout: () => void }) {
+  return <section className="account-panel"><header><span className="kicker">PRIVATE ACCOUNT</span><h2>{connection.user.name}</h2><p>{connection.user.email}</p></header><div className="account-setting"><div><strong>n8n connection</strong><p>{connection.baseUrl || "No saved connection"}</p><small>{connection.connected ? "Active for this account" : connection.saved ? "Saved but disconnected" : "Not configured"}</small></div><div className="account-actions">{connection.connected && <button onClick={onDisconnect}>Disconnect</button>}{connection.saved && <button className="danger-action" onClick={onRemove}>Remove saved connection</button>}</div></div><div className="account-setting"><div><strong>Local n8n</strong><p>Localhost works while Nexus runs on this same computer. A hosted Nexus deployment cannot directly reach localhost; expose n8n through a secure HTTPS URL instead.</p></div></div><div className="account-setting"><div><strong>Session</strong><p>Logging out ends this browser session but keeps your encrypted account connections for your next login.</p></div><button onClick={onLogout}>Log out</button></div></section>;
+}
 
 function ExecutionDrawer({ execution, onClose, onRetry }: { execution: Execution; onClose: () => void; onRetry: () => void }) {
   const status = executionStatus(execution);
