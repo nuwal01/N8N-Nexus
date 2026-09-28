@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     await saveLlmConfig(user.id, config);
     return Response.json({ configured: true, provider: config.provider, model: config.model, discovery: discovery.discovery, discoveryMessage: discovery.discoveryMessage });
   } catch (error) {
-    if (error instanceof ProviderSetupError) return Response.json({ error: error.message }, { status: error.status });
+    if (error instanceof ProviderSetupError) return Response.json({ error: error.message, code: error.code }, { status: error.status });
     return apiError(error);
   }
 }

@@ -45,7 +45,7 @@ export async function POST(request: Request) {
     const approvalToken = proposal.safeToApply && proposal.workflow ? await sealValue({ proposal, userId: user.id, sourceFingerprint, issuedAt: Date.now(), expiresAt: Date.now() + 15 * 60_000 }) : null;
     return Response.json({ proposal, approvalToken });
   } catch (error) {
-    if (error instanceof ProviderSetupError) return Response.json({ error: error.message }, { status: error.status });
+    if (error instanceof ProviderSetupError) return Response.json({ error: error.message, code: error.code }, { status: error.status });
     return apiError(error);
   }
 }

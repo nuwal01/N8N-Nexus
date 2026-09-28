@@ -10,9 +10,19 @@ export const providerDefaults = {
   anthropic: "claude-sonnet-5",
 } as const;
 
+export type ProviderErrorCode =
+  | "INVALID_API_KEY"
+  | "INSUFFICIENT_PERMISSIONS"
+  | "RATE_LIMITED"
+  | "PROVIDER_UNAVAILABLE"
+  | "PROVIDER_TIMEOUT"
+  | "PROVIDER_NETWORK_ERROR"
+  | "UNSUPPORTED_MODEL";
+
 export class ProviderSetupError extends Error {
-  constructor(message: string, public status = 502) {
+  constructor(message: string, public status = 502, public code: ProviderErrorCode = "PROVIDER_UNAVAILABLE") {
     super(message);
+    this.name = "ProviderSetupError";
   }
 }
 
@@ -159,7 +169,17 @@ function modelFor(config: LlmConfig) {
 
 export async function validateProvider(config: LlmConfig) {
   if (config.provider === "demo") return;
-  await generateText({ model: modelFor(config), prompt: "Reply with OK.", maxOutputTokens: 16 });
+  try {
+    await generateText({
+      model: modelFor(config),
+      prompt: "Reply with OK.",
+      maxOutputTokens: 64,
+      maxRetries: 0,
+      timeout: 15_000,
+    });
+  } catch (error) {
+    throw providerError(config.provider, error, "validation");
+  }
 }
 
 type ModelDiscovery = { model: string; availableModels: string[]; discovery: "discovered" | "fallback"; discoveryMessage: string };
@@ -171,41 +191,99 @@ function chooseModel(provider: "openai" | "anthropic", models: string[]) {
   return preferred.map((pattern) => models.find((id) => pattern.test(id))).find(Boolean) || null;
 }
 
+type ProviderErrorContext = "discovery" | "validation" | "generation";
+
+function providerLabel(provider: "openai" | "anthropic") {
+  return provider === "openai" ? "OpenAI" : "Anthropic";
+}
+
+function errorChain(error: unknown) {
+  const chain: unknown[] = [];
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current) && chain.length < 8) {
+    chain.push(current);
+    seen.add(current);
+    current = "cause" in current ? (current as { cause?: unknown }).cause : null;
+  }
+  return chain;
+}
+
+function numericStatus(value: unknown) {
+  const status = typeof value === "string" ? Number(value) : value;
+  return typeof status === "number" && Number.isInteger(status) && status >= 400 && status <= 599 ? status : 0;
+}
+
+function providerStatus(error: unknown) {
+  for (const item of errorChain(error)) {
+    const record = item as Record<string, unknown>;
+    const status = numericStatus(record.statusCode) || numericStatus(record.status) || numericStatus(record.status_code);
+    if (status) return status;
+  }
+  return 0;
+}
+
+function errorIdentity(error: unknown) {
+  return errorChain(error).map((item) => {
+    const record = item as Record<string, unknown>;
+    return [record.name, record.code, record.type].filter((value) => typeof value === "string").join(" ");
+  }).join(" ").toLowerCase();
+}
+
+function providerError(provider: "openai" | "anthropic", error: unknown, context: ProviderErrorContext) {
+  if (error instanceof ProviderSetupError) return error;
+  const label = providerLabel(provider);
+  const status = providerStatus(error);
+  const identity = errorIdentity(error);
+
+  if (status === 401) return new ProviderSetupError(`The ${label} API key is invalid. Create or copy a valid key from ${label}, then try again.`, 401, "INVALID_API_KEY");
+  if (status === 403) return new ProviderSetupError(`${label} accepted the key but it does not have permission to list or use models. Check the key's workspace and permissions.`, 403, "INSUFFICIENT_PERMISSIONS");
+  if (status === 429) return new ProviderSetupError(`${label} rate-limited the request or the account has no available quota. Check provider usage and billing, then try again.`, 429, "RATE_LIMITED");
+  if (status === 408 || status === 504 || /abort|timeout/.test(identity)) return new ProviderSetupError(`${label} did not respond before the request timed out. Try again shortly.`, 504, "PROVIDER_TIMEOUT");
+  if ((status === 400 || status === 404 || status === 422) && context !== "discovery") return new ProviderSetupError(`The selected ${label} model is not supported or is not available to this API key. Remove the manual override and let Nexus select a discovered model.`, 422, "UNSUPPORTED_MODEL");
+  if (status >= 500) return new ProviderSetupError(`${label} is temporarily unavailable (HTTP ${status}). Try again shortly.`, 503, "PROVIDER_UNAVAILABLE");
+  if (/fetch|network|enotfound|econnreset|econnrefused|eai_again|tls|socket/.test(identity) || error instanceof TypeError) {
+    return new ProviderSetupError(`Nexus could not establish a secure connection to ${label}. The provider may be unreachable from the server; try again shortly.`, 502, "PROVIDER_NETWORK_ERROR");
+  }
+  return new ProviderSetupError(`${label} could not complete the request. Try again shortly.`, 503, "PROVIDER_UNAVAILABLE");
+}
+
+function discoveryHttpError(provider: "openai" | "anthropic", status: number) {
+  return providerError(provider, { statusCode: status }, "discovery");
+}
+
 export async function discoverProviderModel(provider: "openai" | "anthropic", apiKey: string, override?: string): Promise<ModelDiscovery> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  const timeout = setTimeout(() => controller.abort(), 15_000);
   const url = provider === "openai" ? "https://api.openai.com/v1/models" : "https://api.anthropic.com/v1/models?limit=100";
   const headers: Record<string, string> = provider === "openai"
     ? { authorization: `Bearer ${apiKey}` }
     : { "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
   try {
-    const response = await fetch(url, { headers, signal: controller.signal });
-    if (response.status === 401 || response.status === 403) throw new ProviderSetupError(`The ${provider === "openai" ? "OpenAI" : "Anthropic"} API key was rejected. Check the key and its permissions.`, 401);
+    const response = await fetch(url, { method: "GET", headers, signal: controller.signal, cache: "no-store" });
     if (!response.ok) {
-      if (![404, 405, 501].includes(response.status)) throw new ProviderSetupError(`${provider === "openai" ? "OpenAI" : "Anthropic"} could not be reached successfully (HTTP ${response.status}). Try again shortly.`, 502);
+      if (![404, 405, 501].includes(response.status)) throw discoveryHttpError(provider, response.status);
       const fallback = override?.trim() || providerDefaults[provider];
       await validateProvider({ provider, apiKey, model: fallback });
       return { model: fallback, availableModels: [], discovery: "fallback", discoveryMessage: `This provider did not make model discovery available (HTTP ${response.status}). Nexus validated and selected the supported default ${fallback}.` };
     }
     const body = await response.json() as { data?: Array<{ id?: string }> };
-    const models = [...new Set((body.data || []).map((item) => item.id).filter((id): id is string => Boolean(id)))];
+    if (!Array.isArray(body.data)) throw new ProviderSetupError(`${providerLabel(provider)} returned an invalid model-discovery response. Try again shortly.`, 502, "PROVIDER_UNAVAILABLE");
+    const models = [...new Set(body.data.map((item) => item.id).filter((id): id is string => Boolean(id)))];
     const requested = override?.trim();
-    if (requested && !models.includes(requested)) throw new ProviderSetupError(`The manual model override “${requested}” is not available to this API key.`, 400);
+    if (requested && !models.includes(requested)) throw new ProviderSetupError(`The manual model override “${requested}” is not available to this API key. Remove the override or choose an exact discovered model ID.`, 422, "UNSUPPORTED_MODEL");
     const selected = requested || chooseModel(provider, models);
     if (!selected) {
       const fallback = providerDefaults[provider];
       await validateProvider({ provider, apiKey, model: fallback });
       return { model: fallback, availableModels: models, discovery: "fallback", discoveryMessage: `The provider returned a model list, but none matched Nexus AI's supported model families. Nexus validated and selected ${fallback}.` };
     }
-    await validateProvider({ provider, apiKey, model: selected });
+    // A successful authenticated model listing proves that the key is valid and
+    // that the selected model is available. Avoid a second, billable generation
+    // request whose model-specific token rules can otherwise make setup fail.
     return { model: selected, availableModels: models, discovery: "discovered", discoveryMessage: `Discovered ${models.length} models available to this key and selected ${selected}.` };
   } catch (error) {
-    if (error instanceof ProviderSetupError) throw error;
-    if (error instanceof Error && error.name === "AbortError") throw new ProviderSetupError(`${provider === "openai" ? "OpenAI" : "Anthropic"} did not respond in time. Check your network and try again.`, 504);
-    const statusCode = typeof error === "object" && error && "statusCode" in error ? Number((error as { statusCode?: unknown }).statusCode) : 0;
-    if (statusCode === 401 || statusCode === 403) throw new ProviderSetupError(`The ${provider === "openai" ? "OpenAI" : "Anthropic"} API key was rejected. Check the key and its permissions.`, 401);
-    if (statusCode === 429) throw new ProviderSetupError(`The ${provider === "openai" ? "OpenAI" : "Anthropic"} key was recognized, but the provider rejected the validation request because of rate limits or account quota. Check billing and usage, then try again.`, 429);
-    throw new ProviderSetupError(`${provider === "openai" ? "OpenAI" : "Anthropic"} could not be reached. Check your network and try again.`, 502);
+    throw providerError(provider, error, "discovery");
   } finally {
     clearTimeout(timeout);
   }
@@ -227,16 +305,13 @@ export async function generateProposal(input: {
       model: modelFor(input.config),
       output: Output.object({ schema: proposalSchema }),
       maxOutputTokens: 4000,
+      maxRetries: 1,
+      timeout: 45_000,
       system: `You are Nexus AI, a cautious n8n workflow assistant. Produce a concrete proposal, never an already-applied result. Never add, expose, replace, or describe credentials or secrets. Never activate a workflow or retry an execution. New workflows must be saved inactive. Use valid n8n workflow JSON with nodes, connections, and settings. If uncertain, choose action guidance, set safeToApply false, explain blockedReason, and give manual steps. For edits, preserve the workflow's intent and make the smallest change. The exact editor URL is ${editorUrl || "unavailable"}.`,
       prompt: JSON.stringify({ task: input.mode, userRequest: input.request, workflow: input.workflow || null, execution: input.execution || null }),
     }));
   } catch (error) {
-    const status = typeof error === "object" && error && "statusCode" in error ? Number((error as { statusCode?: unknown }).statusCode) :
-      typeof error === "object" && error && "status" in error ? Number((error as { status?: unknown }).status) : 0;
-    const provider = input.config.provider === "openai" ? "OpenAI" : "Anthropic";
-    if (status === 401 || status === 403) throw new ProviderSetupError(`${provider} rejected the saved API key. Reconnect the provider in Nexus AI settings.`, 401);
-    if (status === 429) throw new ProviderSetupError(`${provider} rejected the request because of rate limits or account quota. Check billing and usage, then try again.`, 429);
-    throw new ProviderSetupError(`${provider} could not complete the proposal. Check provider availability and the selected model, then try again.`, 502);
+    throw providerError(input.config.provider, error, "generation");
   }
   const anchored = {
     ...output,
