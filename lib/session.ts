@@ -1,39 +1,23 @@
-import { env } from "cloudflare:workers";
-import { database, type UserRecord } from "./db";
+import "server-only";
+
+import { createSupabaseServerClient } from "./supabase/server";
 import type { Connection, LlmConfig } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const AUTH_COOKIE = "nexus_auth";
-const SESSION_DAYS = 14;
 
-function runtimeSecret(name: "SESSION_SECRET" | "DATA_ENCRYPTION_KEY") {
-  const bindings = env as unknown as Record<string, string | undefined>;
-  const value = bindings[name] || process.env[name];
-  if (!value || value.length < 32) throw new Error(`${name} must be configured with at least 32 characters.`);
+export type UserRecord = { id: string; name: string; email: string; created_at: string };
+
+function encryptionSecret() {
+  const value = process.env.DATA_ENCRYPTION_KEY;
+  if (!value || value.length < 32) {
+    throw new StorageError("Secure storage is not configured. Set DATA_ENCRYPTION_KEY to at least 32 characters.", 500, "ENCRYPTION_NOT_CONFIGURED");
+  }
   return value;
 }
 
-function toBase64Url(bytes: Uint8Array) {
-  let binary = "";
-  bytes.forEach((byte) => (binary += String.fromCharCode(byte)));
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function fromBase64Url(value: string) {
-  const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-}
-
-function randomToken(bytes = 32) { return toBase64Url(crypto.getRandomValues(new Uint8Array(bytes))); }
-
-async function sha256(value: string) {
-  return toBase64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))));
-}
-
 async function encryptionKey() {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(runtimeSecret("DATA_ENCRYPTION_KEY")));
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(encryptionSecret()));
   return crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
@@ -41,119 +25,131 @@ export async function sealValue(value: unknown) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await encryptionKey(), encoder.encode(JSON.stringify(value)));
   const payload = new Uint8Array(iv.length + encrypted.byteLength);
-  payload.set(iv); payload.set(new Uint8Array(encrypted), iv.length);
-  return toBase64Url(payload);
+  payload.set(iv);
+  payload.set(new Uint8Array(encrypted), iv.length);
+  return Buffer.from(payload).toString("base64url");
 }
 
 export async function unsealValue<T>(token: string): Promise<T | null> {
   try {
-    const payload = fromBase64Url(token);
+    const payload = new Uint8Array(Buffer.from(token, "base64url"));
+    if (payload.length < 29) return null;
     const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: payload.slice(0, 12) }, await encryptionKey(), payload.slice(12));
     return JSON.parse(decoder.decode(decrypted)) as T;
-  } catch { return null; }
+  } catch (error) {
+    if (error instanceof StorageError) throw error;
+    return null;
+  }
 }
 
-function readNamedCookie(cookieHeader: string | null, name: string) {
-  const token = (cookieHeader || "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
-  return token ? decodeURIComponent(token) : null;
+export class AuthError extends Error {
+  constructor(message: string, public status = 401) { super(message); }
 }
 
-export function authCookie(token: string) {
-  return `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_DAYS * 86400}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
+export class StorageError extends Error {
+  constructor(message: string, public status = 503, public code = "STORAGE_UNAVAILABLE") { super(message); }
 }
 
-export function clearedAuthCookie() { return `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`; }
-
-export async function hashPassword(password: string, salt = randomToken(18)) {
-  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: encoder.encode(salt), iterations: 210_000 }, key, 256);
-  return { hash: toBase64Url(new Uint8Array(bits)), salt };
+function storageError(error: unknown) {
+  if (error instanceof StorageError) return error;
+  const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code || "") : "";
+  if (["42P01", "PGRST205"].includes(code)) {
+    return new StorageError("Nexus storage is not initialized. Apply the Supabase migration, then try again.", 503, "STORAGE_NOT_READY");
+  }
+  if (["42501", "PGRST301"].includes(code)) {
+    return new StorageError("Nexus could not access this account's private data. Verify the Supabase RLS policies and grants.", 503, "STORAGE_ACCESS_DENIED");
+  }
+  return new StorageError("Nexus could not access your private account data. Please try again.");
 }
 
-export async function verifyPassword(password: string, salt: string, expected: string) {
-  const actual = (await hashPassword(password, salt)).hash;
-  if (actual.length !== expected.length) return false;
-  let difference = 0;
-  for (let index = 0; index < actual.length; index += 1) difference |= actual.charCodeAt(index) ^ expected.charCodeAt(index);
-  return difference === 0;
+async function authenticatedContext() {
+  const supabase = await createSupabaseServerClient();
+  const { data, error } = await supabase.auth.getClaims();
+  const claims = data?.claims;
+  const userId = typeof claims?.sub === "string" ? claims.sub : null;
+  if (error || !claims || !userId) {
+    const status = typeof error === "object" && error && "status" in error ? Number((error as { status?: unknown }).status) : 0;
+    if (status >= 500) throw new StorageError("Supabase Auth is temporarily unavailable. Please try again.", 503, "AUTH_UNAVAILABLE");
+    throw new AuthError("Log in to continue.", 401);
+  }
+  return { supabase, userId, claims };
 }
 
-export async function createSession(userId: string) {
-  runtimeSecret("SESSION_SECRET");
-  const token = randomToken();
-  const tokenHash = await sha256(`${runtimeSecret("SESSION_SECRET")}:${token}`);
-  const db = await database();
-  const now = new Date();
-  const expires = new Date(now.getTime() + SESSION_DAYS * 86400_000);
-  await db.prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), userId, tokenHash, expires.toISOString(), now.toISOString()).run();
-  return token;
+export async function getUser(_request?: Request): Promise<UserRecord | null> {
+  void _request;
+  try {
+    const { supabase, userId, claims } = await authenticatedContext();
+    const { data: profile, error } = await supabase.from("profiles").select("name, created_at").eq("id", userId).maybeSingle();
+    if (error) throw storageError(error);
+    const metadata = claims.user_metadata && typeof claims.user_metadata === "object" ? claims.user_metadata as Record<string, unknown> : {};
+    const email = typeof claims.email === "string" ? claims.email : "";
+    const metadataName = typeof metadata.name === "string" ? metadata.name.trim() : "";
+    return { id: userId, name: profile?.name || metadataName || email.split("@")[0] || "Nexus user", email, created_at: profile?.created_at || "" };
+  } catch (error) {
+    if (error instanceof AuthError) return null;
+    throw error;
+  }
 }
 
-export async function getUser(request: Request): Promise<UserRecord | null> {
-  const token = readNamedCookie(request.headers.get("cookie"), AUTH_COOKIE);
-  if (!token) return null;
-  const tokenHash = await sha256(`${runtimeSecret("SESSION_SECRET")}:${token}`);
-  const db = await database();
-  const row = await db.prepare(`SELECT users.id, users.name, users.email, users.created_at
-    FROM sessions JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = ? AND sessions.expires_at > ? LIMIT 1`).bind(tokenHash, new Date().toISOString()).first<UserRecord>();
-  return row || null;
-}
-
-export async function requireUser(request: Request) {
+export async function requireUser(request?: Request) {
   const user = await getUser(request);
   if (!user) throw new AuthError("Log in to continue.", 401);
   return user;
 }
 
-export async function deleteSession(request: Request) {
-  const token = readNamedCookie(request.headers.get("cookie"), AUTH_COOKIE);
-  if (!token) return;
-  const tokenHash = await sha256(`${runtimeSecret("SESSION_SECRET")}:${token}`);
-  const db = await database();
-  await db.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(tokenHash).run();
+async function userClient(expectedUserId?: string) {
+  const context = await authenticatedContext();
+  if (expectedUserId && expectedUserId !== context.userId) throw new AuthError("You cannot access another user's data.", 403);
+  return context;
 }
 
-export class AuthError extends Error { constructor(message: string, public status = 401) { super(message); } }
-
-export async function getConnection(request: Request, includeInactive = false): Promise<Connection | null> {
-  const user = await requireUser(request);
-  const db = await database();
-  const row = await db.prepare("SELECT n8n_connection, n8n_active FROM user_secrets WHERE user_id = ?").bind(user.id).first<{ n8n_connection: string | null; n8n_active: number }>();
-  if (!row?.n8n_connection || (!includeInactive && !row.n8n_active)) return null;
-  return unsealValue<Connection>(row.n8n_connection);
+export async function getConnection(_request?: Request, includeInactive = false): Promise<Connection | null> {
+  const { supabase, userId } = await userClient();
+  const { data, error } = await supabase.from("n8n_connections").select("encrypted_connection, active").eq("user_id", userId).maybeSingle();
+  if (error) throw storageError(error);
+  if (!data?.encrypted_connection || (!includeInactive && !data.active)) return null;
+  const connection = await unsealValue<Connection>(data.encrypted_connection);
+  if (!connection) throw new StorageError("Your saved n8n connection could not be decrypted. Verify that this environment uses the same DATA_ENCRYPTION_KEY that encrypted it.", 500, "DECRYPTION_FAILED");
+  return connection;
 }
 
 export async function saveConnection(userId: string, connection: Connection) {
-  const db = await database(); const encrypted = await sealValue(connection); const now = new Date().toISOString();
-  await db.prepare(`INSERT INTO user_secrets (user_id, n8n_connection, n8n_active, updated_at) VALUES (?, ?, 1, ?)
-    ON CONFLICT(user_id) DO UPDATE SET n8n_connection = excluded.n8n_connection, n8n_active = 1, updated_at = excluded.updated_at`).bind(userId, encrypted, now).run();
+  const { supabase } = await userClient(userId);
+  const { error } = await supabase.from("n8n_connections").upsert({ user_id: userId, encrypted_connection: await sealValue(connection), active: true, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+  if (error) throw storageError(error);
 }
 
 export async function setConnectionActive(userId: string, active: boolean) {
-  const db = await database();
-  await db.prepare("UPDATE user_secrets SET n8n_active = ?, updated_at = ? WHERE user_id = ?").bind(active ? 1 : 0, new Date().toISOString(), userId).run();
+  const { supabase } = await userClient(userId);
+  const { error } = await supabase.from("n8n_connections").update({ active, updated_at: new Date().toISOString() }).eq("user_id", userId);
+  if (error) throw storageError(error);
 }
 
 export async function removeConnection(userId: string) {
-  const db = await database();
-  await db.prepare("UPDATE user_secrets SET n8n_connection = NULL, n8n_active = 0, updated_at = ? WHERE user_id = ?").bind(new Date().toISOString(), userId).run();
+  const { supabase } = await userClient(userId);
+  const { error } = await supabase.from("n8n_connections").delete().eq("user_id", userId);
+  if (error) throw storageError(error);
 }
 
-export async function getLlmConfig(request: Request) {
-  const user = await requireUser(request); const db = await database();
-  const row = await db.prepare("SELECT llm_config FROM user_secrets WHERE user_id = ?").bind(user.id).first<{ llm_config: string | null }>();
-  return row?.llm_config ? unsealValue<LlmConfig>(row.llm_config) : null;
+export async function getLlmConfig(_request?: Request) {
+  void _request;
+  const { supabase, userId } = await userClient();
+  const { data, error } = await supabase.from("ai_settings").select("encrypted_config").eq("user_id", userId).maybeSingle();
+  if (error) throw storageError(error);
+  if (!data?.encrypted_config) return null;
+  const config = await unsealValue<LlmConfig>(data.encrypted_config);
+  if (!config) throw new StorageError("Your saved Nexus AI settings could not be decrypted. Verify that this environment uses the same DATA_ENCRYPTION_KEY that encrypted them.", 500, "DECRYPTION_FAILED");
+  return config;
 }
 
 export async function saveLlmConfig(userId: string, config: LlmConfig) {
-  const db = await database(); const encrypted = await sealValue(config); const now = new Date().toISOString();
-  await db.prepare(`INSERT INTO user_secrets (user_id, llm_config, updated_at) VALUES (?, ?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET llm_config = excluded.llm_config, updated_at = excluded.updated_at`).bind(userId, encrypted, now).run();
+  const { supabase } = await userClient(userId);
+  const { error } = await supabase.from("ai_settings").upsert({ user_id: userId, encrypted_config: await sealValue(config), updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+  if (error) throw storageError(error);
 }
 
 export async function removeLlmConfig(userId: string) {
-  const db = await database();
-  await db.prepare("UPDATE user_secrets SET llm_config = NULL, updated_at = ? WHERE user_id = ?").bind(new Date().toISOString(), userId).run();
+  const { supabase } = await userClient(userId);
+  const { error } = await supabase.from("ai_settings").delete().eq("user_id", userId);
+  if (error) throw storageError(error);
 }

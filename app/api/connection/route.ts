@@ -1,4 +1,4 @@
-import { apiError, n8nFetch, normalizeBaseUrl } from "../../../lib/n8n";
+import { apiError, n8nFetch, normalizeBaseUrl, validateConnectionUrl } from "../../../lib/n8n";
 import { getConnection, removeConnection, requireUser, saveConnection, setConnectionActive } from "../../../lib/session";
 
 export async function GET(request: Request) {
@@ -22,12 +22,15 @@ export async function POST(request: Request) {
       return Response.json({ connected: true, saved: true, mode: saved.mode, baseUrl: saved.baseUrl });
     }
     if (body.demo) {
+      const existing = await getConnection(request, true);
+      if (existing?.mode === "live") return Response.json({ error: "Your saved live n8n connection was not replaced. Reconnect it, or remove it before starting a demo workspace." }, { status: 409 });
       const connection = { mode: "demo" as const, baseUrl: "Demo workspace" };
       await saveConnection(user.id, connection);
       return Response.json({ connected: true, saved: true, mode: "demo", baseUrl: connection.baseUrl });
     }
     if (!body.baseUrl?.trim() || !body.apiKey?.trim()) return Response.json({ error: "Enter both your n8n URL and API key." }, { status: 400 });
-    const connection = { mode: "live" as const, baseUrl: normalizeBaseUrl(body.baseUrl), apiKey: body.apiKey.trim() };
+    const baseUrl = await validateConnectionUrl(normalizeBaseUrl(body.baseUrl), request.url);
+    const connection = { mode: "live" as const, baseUrl, apiKey: body.apiKey.trim() };
     await n8nFetch(connection, "/workflows?limit=1");
     await saveConnection(user.id, connection);
     return Response.json({ connected: true, saved: true, mode: "live", baseUrl: connection.baseUrl });

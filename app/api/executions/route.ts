@@ -6,7 +6,7 @@ export async function GET(request: Request) {
   try {
     const connection = await requireConnection(request);
     if (connection.mode === "demo") return Response.json({ data: demoExecutions });
-    return Response.json(await n8nFetch<{ data: Execution[] }>(connection, "/executions?limit=50&includeData=true"));
+    return Response.json(await n8nFetch<{ data: Execution[] }>(connection, "/executions?limit=50"));
   } catch (error) {
     return apiError(error);
   }
