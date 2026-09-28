@@ -1,7 +1,38 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  turbopack: {
+    root: process.cwd(),
+  },
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+        ],
+      },
+      {
+        source: "/api/:path*",
+        headers: [{ key: "Cache-Control", value: "no-store" }],
+      },
+      {
+        source: "/dashboard/:path*",
+        headers: [{ key: "Cache-Control", value: "no-store" }],
+      },
+      {
+        source: "/login",
+        headers: [{ key: "Cache-Control", value: "no-store" }],
+      },
+      {
+        source: "/signup",
+        headers: [{ key: "Cache-Control", value: "no-store" }],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

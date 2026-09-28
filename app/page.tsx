@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 export const metadata = {
   title: "N8N Nexus — Your automation control room",
@@ -11,7 +12,16 @@ const features = [
   ["03", "Find the break fast", "Jump straight to the failed node, the error message, and the details that help you fix it."],
 ];
 
-export default function Home() {
+export default async function Home({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const query = await searchParams;
+  if (query.code || query.error || query.error_code) {
+    const callbackQuery = new URLSearchParams();
+    for (const name of ["code", "error", "error_code", "error_description"]) {
+      const value = query[name];
+      if (typeof value === "string") callbackQuery.set(name, value);
+    }
+    redirect(`/auth/callback?${callbackQuery.toString()}`);
+  }
   return (
     <main className="landing">
       <nav className="site-nav wrap" aria-label="Primary navigation">

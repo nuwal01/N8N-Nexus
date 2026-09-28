@@ -25,5 +25,5 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body className={`${geist.variable} ${mono.variable}`}>{children}</body></html>;
+  return <html lang="en" data-scroll-behavior="smooth"><body className={`${geist.variable} ${mono.variable}`}>{children}</body></html>;
 }

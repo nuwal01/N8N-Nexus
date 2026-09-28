@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: N8N-Nexus
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_VERSION
+        value: 22.13.0
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: DATA_ENCRYPTION_KEY
+        sync: false
+      - key: APP_URL
+        sync: false
